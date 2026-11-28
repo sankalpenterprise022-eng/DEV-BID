@@ -1,1 +1,2 @@
-@import "tailwindcss";
+/* source(".."): scan the project root (relative to this file), so class detection never depends on the build server's cwd. */
+@import "tailwindcss" source("..");
