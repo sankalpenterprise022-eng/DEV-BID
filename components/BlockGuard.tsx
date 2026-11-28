@@ -1,5 +1,6 @@
 "use client";
 import { useState, useEffect } from "react";
+import { fetchMe, handleSessionExpired, saveDisplayUser } from "@/lib/auth/clientSession";
 
 interface BlockGuardProps {
   permission: string | string[];
@@ -18,15 +19,13 @@ export default function BlockGuard({ permission, children, fallback = null }: Bl
       const parsedUser = JSON.parse(data);
       setUser(parsedUser);
 
-      // Fetch latest permissions dynamically from server to update session
-      fetch(`/api/users?username=${encodeURIComponent(parsedUser.username)}`)
-        .then(res => res.json())
-        .then(updated => {
-          if (updated && updated.permissions) {
-            const freshSession = { ...parsedUser, permissions: updated.permissions };
-            localStorage.setItem("oms_user", JSON.stringify(freshSession));
-            setUser(freshSession);
-          }
+      // Fetch latest permissions from the server session (display only - the
+      // APIs behind each page enforce permissions themselves).
+      fetchMe()
+        .then(me => {
+          if (!me) return handleSessionExpired();
+          saveDisplayUser(me);
+          setUser({ username: me.username, permissions: me.permissions });
         })
         .catch(() => {});
     }

@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { FiEye, FiEyeOff } from "react-icons/fi";
+import { SESSION_KEY, fetchMe, saveDisplayUser } from "@/lib/auth/clientSession";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -11,11 +12,14 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
-  // If already logged in, send them to dashboard immediately
+  // If the session cookie is still valid, send them to dashboard immediately
   useEffect(() => {
-    if (localStorage.getItem("oms_user")) {
-      router.push("/dashboard");
-    }
+    fetchMe()
+      .then((me) => {
+        if (me) { saveDisplayUser(me); router.push("/dashboard"); }
+        else localStorage.removeItem(SESSION_KEY); // stale display cache
+      })
+      .catch(() => {});
   }, [router]);
 
   const handleLogin = async (e: React.FormEvent) => {
@@ -33,7 +37,7 @@ export default function LoginPage() {
       const data = await res.json();
 
       if (res.ok) {
-        localStorage.setItem("oms_user", JSON.stringify(data));
+        saveDisplayUser(data); // display only; the server set the httpOnly session cookie
         router.push("/dashboard");
       } else {
         setError(data.error || "Login Failed");

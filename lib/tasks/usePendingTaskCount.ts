@@ -27,7 +27,7 @@ export function usePendingTaskCount(username: string | null) {
       // Logged out in another tab/after logout -> stop quietly.
       if (!localStorage.getItem("oms_user")) { if (!cancelled) setCount(0); return; }
       try {
-        const res = await fetch("/api/tasks/pending-count", { headers: { "x-oms-user": username }, cache: "no-store" });
+        const res = await fetch("/api/tasks/pending-count", { cache: "no-store" }); // session cookie = identity
         if (!res.ok) throw new Error(`pending-count ${res.status}`);
         const { count: next } = await res.json();
         if (cancelled || typeof next !== "number") return;

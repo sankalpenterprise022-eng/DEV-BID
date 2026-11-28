@@ -25,7 +25,7 @@ const TaskSchema = new Schema(
       default: "GENERAL",
     },
     priority: { type: String, enum: ["LOW", "NORMAL", "HIGH", "URGENT"], default: "NORMAL" },
-    status: { type: String, enum: ["OPEN", "IN_PROGRESS", "WAITING", "DONE", "CLOSED", "CANCELLED"], default: "OPEN" },
+    status: { type: String, enum: ["OPEN", "IN_PROGRESS", "PAUSED", "WAITING", "DONE", "CLOSED", "CANCELLED"], default: "OPEN" },
 
     firm: { type: String, default: "" },
 
@@ -58,15 +58,26 @@ const TaskSchema = new Schema(
 
     checklist: { type: [ChecklistItem], default: [] },
 
+    // Seen + exact work time (Phase 2).
+    seenAt: Date, // first time the assignee opened / acknowledged the task
+    workSessions: {
+      type: [new Schema({ start: { type: Date, required: true }, end: Date, pauseReason: String }, { _id: false })],
+      default: [],
+    },
+    totalWorkSeconds: { type: Number, default: 0 }, // sum of closed sessions
+
     // Kept now, used in later phases (no migration later).
     attachments: [{ name: String, r2Key: String, size: Number, mime: String, uploadedBy: String, uploadedAt: Date }],
     recurrence: {
       enabled: { type: Boolean, default: false },
-      rule: { type: String, enum: ["DAILY", "WEEKLY", "MONTHLY", null], default: null },
+      rule: { type: String, enum: ["DAILY", "WEEKLY", "MONTHLY", "YEARLY", null], default: null },
       weekdays: [Number],
       dayOfMonth: Number,
       parentTaskId: String,
       nextRunAt: Date,
+      // Set on tasks generated from a task_templates doc (source "RECURRING").
+      templateId: String,
+      occurrenceDate: String, // IST "YYYY-MM-DD" the template rule fired for
     },
     extensionRequest: {
       requestedDueAt: Date,
@@ -93,9 +104,18 @@ TaskSchema.index({ assignee: 1, status: 1, dueAt: 1 });
 TaskSchema.index({ assignedBy: 1, status: 1 });
 TaskSchema.index({ status: 1, nextFollowUpAt: 1 });
 TaskSchema.index({ isDeleted: 1, dueAt: 1 });
+// One task per template + assignee + occurrence: makes recurring generation idempotent.
+TaskSchema.index(
+  { "recurrence.templateId": 1, assignee: 1, "recurrence.occurrenceDate": 1 },
+  { unique: true, partialFilterExpression: { "recurrence.templateId": { $type: "string" } }, name: "recurring_occurrence_unique" }
+);
+TaskSchema.index({ source: 1 });
 TaskSchema.index({ "links.sellerOrderId": 1 });
 TaskSchema.index({ "links.bidId": 1 });
 TaskSchema.index({ "links.billId": 1 });
 TaskSchema.index({ title: "text", description: "text", "links.buyerName": "text", "links.gemOrderNo": "text" });
+
+// Dev hot-reload: drop the cached model so schema edits (new fields/statuses) apply without a restart.
+if (process.env.NODE_ENV !== "production" && models.Task) delete (models as any).Task;
 
 export default models.Task || model("Task", TaskSchema);

@@ -14,6 +14,7 @@ const userSchema = new mongoose.Schema({
     },
     // Task module: a manager's team = users whose managerUsername is theirs.
     managerUsername: { type: String, default: null },
-});
+    // Department _id (string) from the `departments` collection; drives department-wide fixed tasks.
+    department: { type: String, default: null },});
 
 export default mongoose.models.User || mongoose.model("User", userSchema);

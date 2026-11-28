@@ -1,5 +1,8 @@
 # Dev Task OMS
 
+> **Full documentation: [PROJECT_DOCUMENTATION.md](PROJECT_DOCUMENTATION.md)** (architecture, roles, data model,
+> recurring tasks, reminders/cron, alert notifications, team board, reports, API list, env vars, deploy checklist).
+
 Standalone copy of the DEV OMS "Task Assign & Follow-up" module (from `TASK_MODULE_EXPORT.md`).
 Next.js 16 (App Router) + MongoDB + Tailwind 4. Auth is the DEV OMS scheme as-is.
 
@@ -23,8 +26,9 @@ npm run dev                    # http://localhost:3000/login
   activity log, waiting/follow-up, stats, navbar badge, Alt+N global create, bulk actions, 409 locking.
 - Urgent Tasks: API + `/dashboard/urgent-tasks` page (admin only). The full-screen popup exists but is
   **disabled** in `app/layout.tsx`, same as DEV OMS.
-- Schema-only models: `TaskFollowUp`, `TaskSettings`, plus `Task.recurrence / escalationLevel / ...`.
-  No cron, reminders, WhatsApp or escalation logic (not built in DEV OMS either).
+- Added since the export: departments, fixed/recurring tasks, holidays, seen + pause + work time, urgent
+  auto-pause, PWA + alert notifications (Web Push) with a 5-minute reminder cron, team board, monthly reports
+  (see PROJECT_DOCUMENTATION.md). `TaskFollowUp` is still schema-only.
 - `/dashboard/settings`: minimal user page (create/edit/delete, `boss`, `taskManager`, `users`, `managerUsername`).
 
 ## Deviations from the export
@@ -34,9 +38,18 @@ npm run dev                    # http://localhost:3000/login
 - `/api/login` uses the URI's default DB (`client.db()`), not a hardcoded `dev_oms_db`, so all code hits one DB.
 - `POST /api/users` also saves `managerUsername` (DEV OMS only saved it on edit).
 - User permissions trimmed to the three the module uses: `boss`, `taskManager`, `users`.
-- Header is a small nav: Tasks (with badge), Urgent (admin), Users (admin / `users` permission), logout.
+- Header nav (shown by permission): Tasks (with badge), Team + Fixed (manager/admin), Reports, Depts, Holidays,
+  Urgent (admin), Alerts (everyone), Users (admin / `users` permission), logout.
 
-## Known security gaps (kept as-is on purpose)
+## Auth (Phase 0 security fix)
 
-Plain-text passwords; identity = `x-oms-user` header (forgeable); `/api/users` and `/api/urgent-tasks`
-have no auth and `/api/users` returns passwords. See export section 4.
+- Passwords are bcrypt-hashed. Existing plain-text passwords: run `npm run migrate:passwords` once
+  (idempotent; `-- --dry` to preview). A not-yet-migrated user is also hashed on their next login.
+- `/api/login` sets an httpOnly, SameSite=Lax session cookie `oms_session` (signed JWT, 30 days,
+  `SESSION_SECRET`). The cookie gets the `Secure` flag on HTTPS. On a plain-http LAN server it doesn't,
+  because browsers drop Secure cookies over http.
+- `getActor()` reads identity **only** from that cookie. `x-oms-user` / `?username=` / body username are ignored.
+- `/api/users` (admin or `users` permission; only admin can grant/edit/delete `boss`; never returns passwords)
+  and `/api/urgent-tasks` (create/list-all = admin, assignee acts on own tasks) are protected server-side.
+- Login rate limit: 10 failed attempts / 15 min per username+IP (`login_attempts` collection, TTL index).
+- `localStorage.oms_user` is a display cache only, refreshed from `GET /api/me`. `POST /api/logout` clears the cookie.

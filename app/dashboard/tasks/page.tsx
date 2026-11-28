@@ -2,10 +2,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FiCheckSquare, FiPlus, FiRefreshCw } from "react-icons/fi";
 import {
-  TASK_CATEGORIES, TASK_PRIORITIES, TASK_STATUSES, TaskDTO, TaskStatKey, TaskSummaryDTO, TaskUserDTO,
+  TASK_CATEGORIES, TASK_PRIORITIES, TASK_STATUSES, TaskDTO, TaskKind, TaskStatKey, TaskSummaryDTO, TaskUserDTO,
 } from "@/lib/tasks/types";
 import TaskStatsRow from "./components/TaskStatsRow";
-import TaskTable from "./components/TaskTable";
+import TaskTable, { QuickAction } from "./components/TaskTable";
 import TaskDrawer from "./components/TaskDrawer";
 import { NEW_TASK_EVENT, TASK_CREATED_EVENT } from "@/components/GlobalTaskCreate";
 import { notifyTasksChanged } from "@/lib/tasks/usePendingTaskCount";
@@ -37,6 +37,7 @@ export default function TasksPage() {
   const [category, setCategory] = useState("");
   const [assignee, setAssignee] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
+  const [kind, setKind] = useState<"" | TaskKind>("");
   const [openId, setOpenId] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [firms, setFirms] = useState<string[]>([]);
@@ -47,6 +48,13 @@ export default function TasksPage() {
     const u = readSessionUser();
     if (u) { setMe(u.username); setSessionRole(roleFromSession(u)); }
     else setLoading(false);
+    // Deep links from notifications: ?task=<id> opens the drawer, ?view=all|team|... picks the tab.
+    const sp = new URLSearchParams(window.location.search);
+    const v = sp.get("view");
+    if (v && ["my", "watching", "byme", "team", "all"].includes(v) && u && roleFromSession(u) !== "staff") setView(v as View);
+    const t = sp.get("task");
+    if (t && /^[a-f0-9]{24}$/i.test(t)) setOpenId(t);
+    if (t || v) window.history.replaceState(null, "", window.location.pathname);
   }, []);
 
   // Prefer the server-resolved role (DB permissions) over the cached session one.
@@ -67,7 +75,7 @@ export default function TasksPage() {
   }, [q]);
 
   // Any filter change goes back to page 1 and clears the bulk selection.
-  useEffect(() => { setPage(1); setSelected(new Set()); }, [view, stat, debouncedQ, status, priority, firm, category, assignee, overdueOnly]);
+  useEffect(() => { setPage(1); setSelected(new Set()); }, [view, stat, debouncedQ, status, priority, firm, category, assignee, overdueOnly, kind]);
 
   const fetchAll = useCallback(async () => {
     if (!me) return;
@@ -80,6 +88,7 @@ export default function TasksPage() {
     if (category) sp.set("category", category);
     if (assignee) sp.set("assignee", assignee);
     if (overdueOnly) sp.set("overdue", "true");
+    if (kind) sp.set("kind", kind);
     try {
       const [list, sum] = await Promise.all([
         api<{ tasks: TaskDTO[]; total: number }>(`/api/tasks?${sp}`, me),
@@ -94,7 +103,7 @@ export default function TasksPage() {
     } finally {
       setLoading(false);
     }
-  }, [me, view, page, stat, debouncedQ, status, priority, firm, category, assignee, overdueOnly, notify]);
+  }, [me, view, page, stat, debouncedQ, status, priority, firm, category, assignee, overdueOnly, kind, notify]);
 
   const fetchUsers = useCallback(async () => {
     if (!me) return;
@@ -103,6 +112,17 @@ export default function TasksPage() {
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
   useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  // Backup for the cron: make sure today's fixed (recurring) tasks exist. The
+  // server throttles this to once per 10 min, so opening the page stays cheap.
+  const ensuredRef = useRef(false);
+  useEffect(() => {
+    if (!me || ensuredRef.current) return;
+    ensuredRef.current = true;
+    api<{ ran: boolean; created: number }>("/api/tasks/recurring", me, { method: "POST" })
+      .then((r) => { if (r.created > 0) { fetchAll(); notifyTasksChanged(); } })
+      .catch(() => { /* list still works without it */ });
+  }, [me, fetchAll]);
 
   // 30 s polling while the tab is visible; refetch immediately when it becomes visible again.
   useEffect(() => {
@@ -137,12 +157,22 @@ export default function TasksPage() {
     return () => window.removeEventListener(TASK_CREATED_EVENT, refreshAll);
   }, [refreshAll]);
 
-  async function quick(task: TaskDTO, action: "start" | "done" | "verify") {
+  async function quick(task: TaskDTO, action: QuickAction) {
     if (!me) return;
     try {
       if (action === "verify") await api(`/api/tasks/${task._id}/verify`, me, { method: "POST", body: {} });
-      else await api(`/api/tasks/${task._id}/status`, me, { method: "POST", body: { status: action === "start" ? "IN_PROGRESS" : "DONE" } });
+      else await api(`/api/tasks/${task._id}/status`, me, { method: "POST", body: { status: action === "done" ? "DONE" : "IN_PROGRESS" } });
       refreshAll();
+    } catch (e) {
+      notify(e instanceof ApiError ? e.message : "Action fail ho gaya", "err");
+    }
+  }
+
+  async function markSeen(task: TaskDTO) {
+    if (!me) return;
+    try {
+      await api(`/api/tasks/${task._id}/seen`, me, { method: "POST" });
+      fetchAll();
     } catch (e) {
       notify(e instanceof ApiError ? e.message : "Action fail ho gaya", "err");
     }
@@ -184,8 +214,8 @@ export default function TasksPage() {
     ...(role === "admin" ? [{ key: "all" as View, label: "All" }] : []),
   ];
   const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
-  const hasFilters = !!(stat || q || status || priority || firm || category || assignee || overdueOnly);
-  const clearFilters = () => { setStat(null); setQ(""); setStatus(""); setPriority(""); setFirm(""); setCategory(""); setAssignee(""); setOverdueOnly(false); };
+  const hasFilters = !!(stat || q || status || priority || firm || category || assignee || overdueOnly || kind);
+  const clearFilters = () => { setStat(null); setQ(""); setStatus(""); setPriority(""); setFirm(""); setCategory(""); setAssignee(""); setOverdueOnly(false); setKind(""); };
 
   return (
     <div className="p-4 md:p-6 bg-[#f3f6f9] min-h-screen">
@@ -222,6 +252,11 @@ export default function TasksPage() {
           <select value={status} onChange={(e) => setStatus(e.target.value)} className={selectCls}>
             <option value="">All status</option>
             {TASK_STATUSES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ")}</option>)}
+          </select>
+          <select value={kind} onChange={(e) => setKind(e.target.value as "" | TaskKind)} className={selectCls} title="Fixed (recurring) ya assigned">
+            <option value="">Recurring + Assigned</option>
+            <option value="recurring">🔁 Recurring (fixed)</option>
+            <option value="assigned">📌 Assigned</option>
           </select>
           <select value={priority} onChange={(e) => setPriority(e.target.value)} className={selectCls}>
             <option value="">All priority</option>
@@ -275,6 +310,7 @@ export default function TasksPage() {
           onToggleAll={(checked) => setSelected(checked ? new Set(tasks.map((t) => t._id)) : new Set())}
           onOpen={setOpenId}
           onQuick={quick}
+          onSeen={markSeen}
         />
 
         <div className="flex items-center justify-between text-xs font-bold text-slate-500">

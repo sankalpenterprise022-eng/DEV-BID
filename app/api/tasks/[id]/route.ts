@@ -17,7 +17,7 @@ export async function PATCH(req: Request, { params }: Ctx) {
   return respond(async () => {
     const { id } = await params;
     const body = await readBody(req);
-    const actor = await getActor(req, body.username);
+    const actor = await getActor(req);
     return patchTask(actor, id, body);
   });
 }

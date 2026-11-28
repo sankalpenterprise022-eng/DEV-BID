@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import dbConnect from "@/lib/dbConnect";
 import type { TaskRole } from "./types";
+import { SessionConfigError, SessionData, isHardcodedAdmin, readSessionToken, verifySession } from "@/lib/auth/session";
 
 export class TaskError extends Error {
   status: number;
@@ -12,9 +13,7 @@ export class TaskError extends Error {
   }
 }
 
-// Same hardcoded super-admins as app/api/login + app/api/users: they may not
-// exist in the users collection at all.
-const HARDCODED_ADMINS = ["admin", "chintan", "hitesh"];
+const FULL_PERMISSIONS = { boss: true, users: true, taskManager: true };
 
 export function getTaskRole(user: { permissions?: Record<string, boolean> } | null | undefined): TaskRole {
   if (user?.permissions?.boss) return "admin";
@@ -27,6 +26,8 @@ export interface TaskActor {
   role: TaskRole;
   /** Manager only: usernames whose managerUsername is this manager. Empty = no team set. */
   team: string[];
+  /** Raw permission flags from the DB (full set for hardcoded admins). */
+  permissions: Record<string, boolean>;
 }
 
 export function usersCollection() {
@@ -36,23 +37,37 @@ export function usersCollection() {
 }
 
 /**
- * Identify the acting user. Mirrors the existing routes (client sends the
- * username) but re-reads permissions from the DB on every request.
- * Known gap: a forged username can impersonate a user (spec D4 / section 11).
+ * Identify the acting user from the signed httpOnly session cookie ONLY
+ * (set by /api/login). Header / query / body usernames are ignored.
+ * Permissions are re-read from the DB on every request, so a permission
+ * change or user delete takes effect immediately.
  */
-export async function getActor(req: Request, bodyUsername?: string | null): Promise<TaskActor> {
+export async function getActor(req: Request): Promise<TaskActor> {
+  let session: SessionData | null;
+  try {
+    session = await verifySession(readSessionToken(req));
+  } catch (e) {
+    if (e instanceof SessionConfigError) throw new TaskError(500, e.message);
+    throw e;
+  }
+  if (!session) throw new TaskError(401, "Login karo pehle (session nahi mila ya expire ho gaya)");
+  const { username } = session;
   await dbConnect();
-  const url = new URL(req.url);
-  const username = (req.headers.get("x-oms-user") || url.searchParams.get("username") || bodyUsername || "").trim();
-  if (!username) throw new TaskError(401, "Login karo pehle (user pehchaan nahi hui)");
 
   let role: TaskRole;
-  if (HARDCODED_ADMINS.includes(username.toLowerCase())) {
+  let permissions: Record<string, boolean>;
+  // Only a fallback-password login is a hardcoded admin; a DB user named "Admin"
+  // gets exactly their DB permissions (the name alone grants nothing).
+  if (session.fallbackAdmin && isHardcodedAdmin(username)) {
+    // Session for a hardcoded admin stops working once the fallback login is disabled.
+    if (!process.env.ADMIN_FALLBACK_PASSWORD) throw new TaskError(401, "Admin login band hai, dobara login karo");
     role = "admin";
+    permissions = { ...FULL_PERMISSIONS };
   } else {
     const user = await usersCollection().findOne({ username }, { projection: { permissions: 1 } });
     if (!user) throw new TaskError(401, "User nahi mila, dobara login karo");
     role = getTaskRole(user as any);
+    permissions = { ...((user as any).permissions || {}) };
   }
 
   let team: string[] = [];
@@ -62,8 +77,11 @@ export async function getActor(req: Request, bodyUsername?: string | null): Prom
       .toArray();
     team = members.map((m: any) => m.username);
   }
-  return { username, role, team };
+  return { username, role, team, permissions };
 }
+
+/** Users page access: admin or the `users` permission. */
+export const canManageUsers = (a: TaskActor) => a.role === "admin" || a.permissions.users === true;
 
 export const isManagerOrAdmin = (a: TaskActor) => a.role === "admin" || a.role === "manager";
 

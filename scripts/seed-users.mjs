@@ -2,6 +2,7 @@
 // Usage: npm run seed   (reads MONGODB_URI + SEED_PASSWORD from .env.local)
 // Upserts by username, so it is safe to run more than once.
 import { MongoClient } from "mongodb";
+import bcrypt from "bcryptjs";
 
 const uri = process.env.MONGODB_URI;
 const password = process.env.SEED_PASSWORD;
@@ -21,10 +22,11 @@ try {
   await client.connect();
   const col = client.db().collection("users");
   await col.createIndex({ username: 1 }, { unique: true });
+  const hash = await bcrypt.hash(password, 10); // passwords are stored bcrypt-hashed
   for (const u of users) {
     await col.updateOne(
       { username: u.username },
-      { $set: { ...u, password }, $setOnInsert: { createdAt: new Date() } },
+      { $set: { ...u, password: hash }, $setOnInsert: { createdAt: new Date() } },
       { upsert: true }
     );
     console.log(`seeded ${u.username}`);

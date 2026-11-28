@@ -1,9 +1,10 @@
 "use client";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { FiX } from "react-icons/fi";
 import { TASK_PRIORITIES, WAITING_ON, ChecklistItemDTO, TaskActivityDTO, TaskDTO } from "@/lib/tasks/types";
 import {
-  ApiError, FOLLOWUP_CHIPS, PRIORITY_META, STATUS_META, TaskCtx, api, fmtDateTime, relativeDue, toLocalInput,
+  ApiError, FOLLOWUP_CHIPS, autoPausedNote, isUrgentActive, PAUSE_REASONS, PRIORITY_META, STATUS_META, TaskCtx, api, fmtDateKey, fmtDateTime, fmtDuration,
+  relativeDue, taskKindBadge, toLocalInput, workSecondsNow,
 } from "./taskUi";
 
 interface Props {
@@ -14,7 +15,7 @@ interface Props {
   onChanged: () => void;
 }
 
-type Panel = null | "waiting" | "reject" | "reopen" | "cancel";
+type Panel = null | "waiting" | "reject" | "reopen" | "cancel" | "pause";
 type ActTab = "all" | "comments" | "system";
 
 const btn = "px-4 py-2 rounded-xl text-[11px] font-black uppercase tracking-wider cursor-pointer disabled:opacity-50";
@@ -50,16 +51,36 @@ export default function TaskDrawer({ taskId, ctx, onClose, onChanged }: Props) {
 
   useEffect(() => { setTask(null); setPanel(null); load(); }, [load]);
 
+  // Assignee opening the drawer = seen (once; the server ignores repeats / other users).
+  const seenSent = useRef<string | null>(null);
+  useEffect(() => {
+    if (!task || task.assignee !== ctx.me || task.seenAt || seenSent.current === task._id) return;
+    seenSent.current = task._id;
+    api<{ task: TaskDTO; seen: boolean }>(`/api/tasks/${task._id}/seen`, ctx.me, { method: "POST" })
+      .then((r) => { if (r.seen) { setTask(r.task); onChanged(); load(); } })
+      .catch(() => { /* not critical */ });
+  }, [task, ctx.me, onChanged, load]);
+
+  // Live work timer while IN_PROGRESS.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (task?.status !== "IN_PROGRESS") return;
+    const id = setInterval(() => setNow(Date.now()), 15_000);
+    return () => clearInterval(id);
+  }, [task?.status]);
+
   /** Run a mutation, refresh drawer + list, surface 409 with a refresh option. */
   async function run(fn: () => Promise<any>, okMsg?: string) {
     setBusy(true);
     try {
-      await fn();
+      const res = await fn();
       setPanel(null);
       setReason("");
       await load();
       onChanged();
-      if (okMsg) ctx.notify(okMsg);
+      // Urgent priority / reassign / reopen may have auto-paused the assignee's running task.
+      const note = autoPausedNote(res?.autoPaused);
+      if (okMsg || note) ctx.notify(`${okMsg || "Ho gaya."}${note}`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) setConflict(true);
       ctx.notify(e instanceof ApiError ? e.message : "Action fail ho gaya", "err");
@@ -86,6 +107,18 @@ export default function TaskDrawer({ taskId, ctx, onClose, onChanged }: Props) {
 
   const checklist = task.checklist || [];
   const doneCount = checklist.filter((c) => c.done).length;
+
+  // Every closed session that ended with a reason = one pause/waiting/cancel stop; the next session's start = resumed.
+  const sessions = task.workSessions || [];
+  const pauses = sessions
+    .map((s, i) => ({ s, next: sessions[i + 1] }))
+    .filter(({ s }) => s.end && s.pauseReason)
+    .map(({ s, next }) => ({
+      reason: s.pauseReason!,
+      at: s.end!,
+      resumedAt: next?.start,
+      worked: (new Date(s.end!).getTime() - new Date(s.start).getTime()) / 1000,
+    }));
 
   async function toggleItem(item: ChecklistItemDTO) {
     const next = checklist.map((c) => ({ _id: c._id, text: c.text, done: c._id === item._id ? !c.done : c.done }));
@@ -123,9 +156,23 @@ export default function TaskDrawer({ taskId, ctx, onClose, onChanged }: Props) {
         <div className="flex flex-wrap items-center gap-2">
           <span className={`text-[10px] font-black uppercase border rounded-full px-2.5 py-0.5 ${STATUS_META[task.status].cls}`}>{STATUS_META[task.status].label}</span>
           <span className={`text-[10px] font-black uppercase border rounded-full px-2.5 py-0.5 ${PRIORITY_META[task.priority].cls}`}>{PRIORITY_META[task.priority].label}</span>
+          {(() => {
+            const k = taskKindBadge(task);
+            return (
+              <span title={k.title} className={`text-[10px] font-black uppercase border rounded-full px-2.5 py-0.5 ${k.cls}`}>
+                {k.label}{task.recurrence?.occurrenceDate ? ` · ${fmtDateKey(task.recurrence.occurrenceDate)}` : ""}
+              </span>
+            );
+          })()}
           <span className={`text-xs font-bold ${due.overdue ? "text-red-600" : "text-slate-500"}`}>{due.text}</span>
           {due.overdue && <span className="text-[10px] font-black uppercase bg-red-600 text-white rounded-full px-2 py-0.5">Overdue</span>}
         </div>
+        {isUrgentActive(task) && (
+          <div className="flex items-center gap-2 bg-red-600 text-white rounded-xl px-3 py-2 text-xs font-black">
+            <span className="text-base">🚨</span>
+            <span>URGENT task - baaki kaam rok kar ye pehle karo</span>
+          </div>
+        )}
       </div>
 
       {conflict && (
@@ -139,17 +186,20 @@ export default function TaskDrawer({ taskId, ctx, onClose, onChanged }: Props) {
       <div className="p-5 space-y-3 border-b border-slate-100">
         <div className="flex flex-wrap gap-2">
           {canAct && task.status === "OPEN" && <button disabled={busy} onClick={() => setStatus("IN_PROGRESS")} className={`${btn} bg-blue-600 text-white`}>Start</button>}
-          {canAct && task.status === "WAITING" && <button disabled={busy} onClick={() => setStatus("IN_PROGRESS")} className={`${btn} bg-blue-600 text-white`}>Resume</button>}
-          {canAct && (task.status === "OPEN" || task.status === "IN_PROGRESS") && (
+          {canAct && (task.status === "WAITING" || task.status === "PAUSED") && <button disabled={busy} onClick={() => setStatus("IN_PROGRESS")} className={`${btn} bg-blue-600 text-white`}>▶ Resume</button>}
+          {canAct && task.status === "IN_PROGRESS" && (
+            <button disabled={busy} onClick={() => { setReason(""); setPanel(panel === "pause" ? null : "pause"); }} className={`${btn} bg-orange-100 text-orange-800`}>⏸ Pause</button>
+          )}
+          {canAct && (task.status === "OPEN" || task.status === "IN_PROGRESS" || task.status === "PAUSED") && (
             <button disabled={busy} onClick={() => setPanel(panel === "waiting" ? null : "waiting")} className={`${btn} bg-amber-100 text-amber-800`}>Mark Waiting</button>
           )}
-          {canAct && (task.status === "OPEN" || task.status === "IN_PROGRESS" || task.status === "WAITING") && (
+          {canAct && (task.status === "OPEN" || task.status === "IN_PROGRESS" || task.status === "PAUSED" || task.status === "WAITING") && (
             <button disabled={busy} onClick={() => setStatus("DONE")} className={`${btn} bg-emerald-600 text-white`}>Mark Done</button>
           )}
           {mgr && task.status === "DONE" && <button disabled={busy} onClick={() => run(() => post("verify"), "Verify karke close kiya")} className={`${btn} bg-emerald-600 text-white`}>Verify & Close</button>}
           {mgr && task.status === "DONE" && <button disabled={busy} onClick={() => setPanel(panel === "reject" ? null : "reject")} className={`${btn} bg-red-100 text-red-700`}>Reject</button>}
           {mgr && task.status === "CLOSED" && <button disabled={busy} onClick={() => setPanel(panel === "reopen" ? null : "reopen")} className={`${btn} bg-violet-100 text-violet-700`}>Reopen</button>}
-          {mgr && (task.status === "OPEN" || task.status === "IN_PROGRESS" || task.status === "WAITING") && <button disabled={busy} onClick={() => setPanel(panel === "cancel" ? null : "cancel")} className={`${btn} bg-slate-100 text-slate-600`}>Cancel</button>}
+          {mgr && (task.status === "OPEN" || task.status === "IN_PROGRESS" || task.status === "PAUSED" || task.status === "WAITING") && <button disabled={busy} onClick={() => setPanel(panel === "cancel" ? null : "cancel")} className={`${btn} bg-slate-100 text-slate-600`}>Cancel</button>}
         </div>
 
         {panel === "waiting" && (
@@ -171,18 +221,27 @@ export default function TaskDrawer({ taskId, ctx, onClose, onChanged }: Props) {
             >Set Waiting</button>
           </div>
         )}
-        {(panel === "reject" || panel === "reopen" || panel === "cancel") && (
-          <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
-            <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} placeholder="Reason (zaroori)" className={field} />
+        {(panel === "reject" || panel === "reopen" || panel === "cancel" || panel === "pause") && (
+          <div className={`p-3 rounded-xl border space-y-2 ${panel === "pause" ? "bg-orange-50/60 border-orange-200" : "bg-slate-50 border-slate-200"}`}>
+            {panel === "pause" && (
+              <div className="flex flex-wrap gap-1.5">
+                {PAUSE_REASONS.map((r) => (
+                  <button key={r} type="button" onClick={() => setReason(r)}
+                    className="text-[10px] font-black uppercase bg-white border border-orange-200 hover:bg-orange-100 rounded-full px-3 py-1 cursor-pointer">{r}</button>
+                ))}
+              </div>
+            )}
+            <textarea value={reason} onChange={(e) => setReason(e.target.value)} rows={2} placeholder={panel === "pause" ? "Pause kyun? (zaroori)" : "Reason (zaroori)"} className={field} />
             <button
               disabled={busy}
               onClick={() => {
                 if (!reason.trim()) return ctx.notify("Reason likhna zaroori hai", "err");
                 if (panel === "cancel") return setStatus("CANCELLED", { reason });
+                if (panel === "pause") return setStatus("PAUSED", { reason });
                 return run(() => post(panel, { reason }), panel === "reject" ? "Task reject hua" : "Task reopen hua");
               }}
               className={`${btn} bg-[#0a2540] text-white`}
-            >Confirm {panel}</button>
+            >{panel === "pause" ? "Confirm pause" : `Confirm ${panel}`}</button>
           </div>
         )}
       </div>
@@ -232,8 +291,36 @@ export default function TaskDrawer({ taskId, ctx, onClose, onChanged }: Props) {
               <Info label="Next follow-up"><b>{fmtDateTime(task.nextFollowUpAt)}</b></Info>
             </>
           )}
-          {task.completedAt && <Info label="Completed"><b>{fmtDateTime(task.completedAt)}</b></Info>}
           {task.closedAt && <Info label="Closed"><b>{fmtDateTime(task.closedAt)} by {task.closedBy}</b></Info>}
+        </div>
+
+        {/* Work time */}
+        <div className="rounded-2xl border border-slate-200 p-3 space-y-2">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+            <Info label="Started at"><b>{task.startedAt ? fmtDateTime(task.startedAt) : "-"}</b></Info>
+            <Info label="Completed at"><b>{task.completedAt ? fmtDateTime(task.completedAt) : "-"}</b></Info>
+            <Info label="Work time">
+              <b className={task.status === "IN_PROGRESS" ? "text-emerald-600" : ""}>
+                {fmtDuration(workSecondsNow(task, now))}{task.status === "IN_PROGRESS" ? " ●" : ""}
+              </b>
+            </Info>
+            <Info label="Seen">
+              {task.seenAt ? <b>{fmtDateTime(task.seenAt)}</b> : <b className="text-rose-600">Not seen</b>}
+            </Info>
+          </div>
+          {pauses.length > 0 && (
+            <div>
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Pause / break history</p>
+              <ul className="space-y-1">
+                {pauses.map((p, i) => (
+                  <li key={i} className="text-[11px] text-slate-600 flex justify-between gap-2">
+                    <span><b className="text-orange-700">⏸ {p.reason}</b> · {fmtDuration(p.worked)} kaam ke baad</span>
+                    <span className="text-slate-400 whitespace-nowrap">{fmtDateTime(p.at)}{p.resumedAt ? ` → ${fmtDateTime(p.resumedAt)}` : ""}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
 
         {(task.watchers?.length > 0) && (
@@ -254,7 +341,7 @@ export default function TaskDrawer({ taskId, ctx, onClose, onChanged }: Props) {
           <div>
             <div className="flex items-center justify-between mb-1.5">
               <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Checklist</p>
-              <p className="text-[10px] font-bold text-slate-500">{doneCount}/{checklist.length}</p>
+              <p className="text-[10px] font-bold text-slate-500">{doneCount}/{checklist.length} · {Math.round((doneCount / checklist.length) * 100)}%</p>
             </div>
             <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mb-2">
               <div className="h-full bg-emerald-500 transition-all" style={{ width: `${(doneCount / checklist.length) * 100}%` }} />

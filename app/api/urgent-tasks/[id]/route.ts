@@ -1,22 +1,20 @@
 import { NextResponse } from "next/server";
 import mongoose from "mongoose";
 import UrgentTask from "@/models/UrgentTask";
-
-async function connectMongoose() {
-  if (mongoose.connection.readyState !== 1 && process.env.MONGODB_URI) {
-    await mongoose.connect(process.env.MONGODB_URI);
-  }
-}
+import { TaskError, getActor } from "@/lib/tasks/permissions";
 
 const SNOOZE_MS = 10 * 60 * 1000; // 10 minutes
 
 // PATCH /api/urgent-tasks/[id] - body: { action: "done" | "snooze" }.
 // Called by the assignee from the full-screen popup - these are the only two
-// ways it can ever be dismissed.
+// ways it can ever be dismissed. Only the assignee (or an admin) may act on it.
 export async function PATCH(req: Request, { params }: { params: Promise<{ id: string }> }) {
   try {
-    await connectMongoose();
+    const actor = await getActor(req);
     const { id } = await params;
+    if (!mongoose.isValidObjectId(id)) {
+      return NextResponse.json({ error: "This task no longer exists or was already resolved" }, { status: 409 });
+    }
     const { action } = await req.json();
 
     if (!["done", "snooze"].includes(action)) {
@@ -31,7 +29,11 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
     // Only a still-open task can be acted on - a stale/duplicate click must not
     // resurrect an already-completed task back to snoozed.
     const task = await UrgentTask.findOneAndUpdate(
-      { _id: id, status: { $in: ["pending", "snoozed"] } },
+      {
+        _id: id,
+        status: { $in: ["pending", "snoozed"] },
+        ...(actor.role === "admin" ? {} : { assignedTo: actor.username }),
+      },
       update,
       { new: true }
     ).lean();
@@ -41,6 +43,7 @@ export async function PATCH(req: Request, { params }: { params: Promise<{ id: st
 
     return NextResponse.json(task);
   } catch (error: any) {
+    if (error instanceof TaskError) return NextResponse.json({ error: error.message }, { status: error.status });
     console.error("PATCH urgent-tasks error:", error);
     return NextResponse.json({ error: error.message || "Failed to update urgent task" }, { status: 500 });
   }

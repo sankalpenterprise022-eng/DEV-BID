@@ -14,7 +14,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   return respond(async () => {
     const body = await readBody(req);
-    const actor = await getActor(req, body.username);
+    const actor = await getActor(req);
     return createTask(actor, body);
   }, 201);
 }

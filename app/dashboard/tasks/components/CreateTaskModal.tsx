@@ -1,8 +1,8 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { FiX } from "react-icons/fi";
-import { TASK_CATEGORIES, TASK_PRIORITIES } from "@/lib/tasks/types";
-import { ApiError, CATEGORY_LABEL, DUE_CHIPS, TaskCtx, api, toLocalInput } from "./taskUi";
+import { DepartmentDTO, TASK_CATEGORIES, TASK_PRIORITIES } from "@/lib/tasks/types";
+import { ApiError, CATEGORY_LABEL, DUE_CHIPS, TaskCtx, api, autoPausedNote, toLocalInput } from "./taskUi";
 import SearchableSelect from "./SearchableSelect";
 
 interface Props {
@@ -18,7 +18,11 @@ export default function CreateTaskModal({ ctx, onClose, onCreated }: Props) {
   const staff = ctx.role === "staff";
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
-  const [assignee, setAssignee] = useState(ctx.me);
+  // Managers/admins: several users (one task each) or a whole department.
+  const [mode, setMode] = useState<"users" | "department">("users");
+  const [assignees, setAssignees] = useState<string[]>([ctx.me]);
+  const [departmentId, setDepartmentId] = useState("");
+  const [departments, setDepartments] = useState<DepartmentDTO[]>([]);
   const [priority, setPriority] = useState("NORMAL");
   const [dueAt, setDueAt] = useState("");
   const [category, setCategory] = useState("GENERAL");
@@ -31,21 +35,29 @@ export default function CreateTaskModal({ ctx, onClose, onCreated }: Props) {
   const titleRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => titleRef.current?.focus(), []);
+  useEffect(() => {
+    if (staff) return;
+    api<DepartmentDTO[]>("/api/departments", ctx.me).then((d) => setDepartments(d.filter((x) => x.active))).catch(() => {});
+  }, [staff, ctx.me]);
+
+  const dept = departments.find((d) => d._id === departmentId);
+  const targets = staff ? [ctx.me] : mode === "department" ? dept?.members ?? [] : assignees;
+  const onlyMe = targets.length === 1 && targets[0] === ctx.me;
 
   // Self-tasks default to no verification; tasks for others default to verification (spec 6.4).
   useEffect(() => {
-    if (!verTouched) setRequiresVerification(assignee !== ctx.me);
-  }, [assignee, ctx.me, verTouched]);
+    if (!verTouched) setRequiresVerification(!onlyMe);
+  }, [onlyMe, verTouched]);
 
   const assignable = ctx.users.filter((u) => u.assignable);
   const assigneeOptions = assignable.map((u) => ({ value: u.username, label: `${u.username} (${u.openCount} open)`, searchText: u.username }));
   const categoryOptions = TASK_CATEGORIES.map((c) => ({ value: c, label: CATEGORY_LABEL(c) }));
-  // The assignee is already on the task, so they are not offered as a watcher.
-  const watcherOptions = ctx.users.filter((u) => u.username !== assignee).map((u) => ({ value: u.username, label: u.username }));
+  // Assignees already own the task, so they are not offered as watchers.
+  const watcherOptions = ctx.users.filter((u) => !targets.includes(u.username)).map((u) => ({ value: u.username, label: u.username }));
 
-  function changeAssignee(next: string) {
-    setAssignee(next);
-    setWatchers((w) => w.filter((x) => x !== next));
+  function changeAssignees(next: string[]) {
+    setAssignees(next);
+    setWatchers((w) => w.filter((x) => !next.includes(x)));
   }
 
   async function submit() {
@@ -53,17 +65,22 @@ export default function CreateTaskModal({ ctx, onClose, onCreated }: Props) {
     setError("");
     if (!title.trim()) return setError("Title zaroori hai");
     if (!dueAt) return setError("Due date zaroori hai");
+    if (!staff && mode === "users" && !assignees.length) return setError("Kam se kam ek assignee chuno");
+    if (!staff && mode === "department" && !departmentId) return setError("Department chuno");
+    if (!staff && mode === "department" && !dept?.members.length) return setError("Is department mein koi user nahi hai");
     setSaving(true);
     try {
-      const res = await api<{ warning?: string }>("/api/tasks", ctx.me, {
+      const who = staff ? { assignee: ctx.me } : mode === "department" ? { departmentId } : { assignees };
+      const res = await api<{ warning?: string; count?: number; autoPaused?: { taskNo: string; assignee: string }[] }>("/api/tasks", ctx.me, {
         method: "POST",
         body: {
-          title, description, assignee, priority, category, watchers, requiresVerification,
+          title, description, ...who, priority, category, watchers, requiresVerification,
           dueAt: new Date(dueAt).toISOString(),
           checklist: checklist.split("\n").map((s) => s.trim()).filter(Boolean),
         },
       });
-      ctx.notify(res.warning ? `Task bana. ${res.warning}` : "Task ban gaya");
+      const made = (res.count ?? 1) > 1 ? `${res.count} tasks ban gaye (har ek ka alag)` : "Task ban gaya";
+      ctx.notify(`${res.warning ? `${made}. ${res.warning}` : made}${autoPausedNote(res.autoPaused)}`);
       onCreated();
     } catch (e) {
       setError(e instanceof ApiError ? e.message : "Task nahi bana");
@@ -109,11 +126,33 @@ export default function CreateTaskModal({ ctx, onClose, onCreated }: Props) {
           <div className="space-y-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className={labelCls}>Assignee *</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className={`${labelCls} mb-0`}>Assign to *</label>
+                {!staff && (
+                  <div className="flex rounded-full bg-slate-100 p-0.5 text-[9px] font-black uppercase">
+                    {(["users", "department"] as const).map((m) => (
+                      <button key={m} type="button" onClick={() => setMode(m)}
+                        className={`px-2 py-0.5 rounded-full cursor-pointer ${mode === m ? "bg-[#0a2540] text-white" : "text-slate-500"}`}>
+                        {m === "users" ? "User(s)" : "Department"}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
               {staff ? (
                 <input value={ctx.me} disabled className={`${inputCls} bg-slate-50 text-slate-500`} />
+              ) : mode === "users" ? (
+                <SearchableSelect multiple value={assignees} onChange={changeAssignees} options={assigneeOptions} placeholder="Select assignee(s)" />
               ) : (
-                <SearchableSelect value={assignee} onChange={changeAssignee} options={assigneeOptions} placeholder="Select assignee" />
+                <select value={departmentId} onChange={(e) => setDepartmentId(e.target.value)} className={inputCls}>
+                  <option value="">Select department...</option>
+                  {departments.map((d) => <option key={d._id} value={d._id}>{d.name} ({d.members.length} log)</option>)}
+                </select>
+              )}
+              {!staff && targets.length > 1 && (
+                <p className="text-[10px] font-bold text-slate-500 mt-1">
+                  {targets.length} alag tasks banenge: {targets.slice(0, 6).join(", ")}{targets.length > 6 ? "..." : ""}
+                </p>
               )}
             </div>
             <div>

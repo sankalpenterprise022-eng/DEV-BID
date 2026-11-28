@@ -8,6 +8,8 @@ const CARDS: { key: TaskStatKey; label: string; cls: string; active: string }[] 
   { key: "waiting", label: "Waiting", cls: "text-amber-600", active: "ring-amber-500" },
   { key: "followUpsToday", label: "Follow-ups Today", cls: "text-sky-700", active: "ring-sky-600" },
   { key: "toVerify", label: "To Verify", cls: "text-violet-700", active: "ring-violet-600" },
+  { key: "paused", label: "Paused", cls: "text-orange-600", active: "ring-orange-500" },
+  { key: "notSeen", label: "Not Seen", cls: "text-rose-600", active: "ring-rose-500" },
 ];
 
 interface Props {
@@ -18,7 +20,7 @@ interface Props {
 
 export default function TaskStatsRow({ summary, active, onSelect }: Props) {
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+    <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
       {CARDS.map((c) => {
         const isActive = active === c.key;
         return (

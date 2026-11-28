@@ -7,7 +7,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   return respond(async () => {
     const { id } = await params;
     const body = await readBody(req);
-    const actor = await getActor(req, body.username);
+    const actor = await getActor(req);
     return assignTask(actor, id, body);
   });
 }

@@ -13,12 +13,14 @@ interface UserRow {
   password?: string;
   permissions?: Partial<Perms>;
   managerUsername?: string | null;
+  department?: string | null;
 }
 
 const initialState = {
   username: "",
   password: "",
   managerUsername: "",
+  department: "",
   permissions: { boss: false, taskManager: false, users: false } as Perms,
 };
 
@@ -41,13 +43,23 @@ export default function SettingsPage() {
     try {
       const res = await fetch("/api/users", { cache: "no-store" });
       const data = await res.json();
+      if (!res.ok) throw new Error(data?.error);
       setUsers(Array.isArray(data) ? data : []);
-    } catch {
-      setMessage({ text: "Users load nahi hue", err: true });
+    } catch (err: any) {
+      setMessage({ text: err?.message || "Users load nahi hue", err: true });
     }
   }, []);
 
   useEffect(() => { fetchUsers(); }, [fetchUsers]);
+
+  const [departments, setDepartments] = useState<{ _id: string; name: string; active: boolean }[]>([]);
+  useEffect(() => {
+    fetch("/api/departments", { cache: "no-store" })
+      .then((r) => (r.ok ? r.json() : []))
+      .then((d) => setDepartments(Array.isArray(d) ? d : []))
+      .catch(() => {});
+  }, []);
+  const deptName = (id?: string | null) => (id ? departments.find((d) => d._id === id)?.name ?? "?" : "-");
 
   const reset = () => { setFormData(initialState); setEditingId(null); };
 
@@ -55,8 +67,9 @@ export default function SettingsPage() {
     setEditingId(u._id);
     setFormData({
       username: u.username,
-      password: u.password || "",
+      password: "", // never sent by the API; blank = keep current password
       managerUsername: u.managerUsername || "",
+      department: u.department || "",
       permissions: {
         boss: u.permissions?.boss || false,
         taskManager: u.permissions?.taskManager || false,
@@ -68,7 +81,7 @@ export default function SettingsPage() {
 
   const save = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formData.username.trim() || !formData.password) {
+    if (!formData.username.trim() || (!editingId && !formData.password)) {
       setMessage({ text: "Username aur password zaroori hain", err: true });
       return;
     }
@@ -80,6 +93,7 @@ export default function SettingsPage() {
         ...formData,
         username: formData.username.trim(),
         managerUsername: formData.managerUsername.trim() || null,
+        department: formData.department || null,
         // keep any permission keys this page doesn't show
         permissions: { ...(existing?.permissions || {}), ...formData.permissions },
       };
@@ -103,7 +117,8 @@ export default function SettingsPage() {
   const remove = async (u: UserRow) => {
     if (!confirm(`User "${u.username}" delete karna hai?`)) return;
     const res = await fetch(`/api/users/${u._id}`, { method: "DELETE" });
-    if (!res.ok) setMessage({ text: "Delete fail ho gaya", err: true });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) setMessage({ text: data.error || "Delete fail ho gaya", err: true });
     else { if (editingId === u._id) reset(); fetchUsers(); }
   };
 
@@ -145,8 +160,9 @@ export default function SettingsPage() {
                 onChange={(e) => setFormData({ ...formData, username: e.target.value })}
               />
               <input
-                type="text"
-                placeholder="Password"
+                type="password"
+                autoComplete="new-password"
+                placeholder={editingId ? "New password (khaali = same rahega)" : "Password"}
                 value={formData.password}
                 className={inputCls}
                 onChange={(e) => setFormData({ ...formData, password: e.target.value })}
@@ -155,9 +171,20 @@ export default function SettingsPage() {
                 type="text"
                 placeholder="Task manager username (optional - who manages this user's tasks)"
                 value={formData.managerUsername || ""}
-                className={`${inputCls} md:col-span-2`}
+                className={inputCls}
                 onChange={(e) => setFormData({ ...formData, managerUsername: e.target.value.trim() })}
               />
+              <select
+                value={formData.department}
+                className={`${inputCls} bg-white`}
+                onChange={(e) => setFormData({ ...formData, department: e.target.value })}
+                title="Department ke fixed (recurring) tasks is user ko bhi milenge"
+              >
+                <option value="">No department</option>
+                {departments.map((d) => (
+                  <option key={d._id} value={d._id}>{d.name}{d.active ? "" : " (band)"}</option>
+                ))}
+              </select>
             </div>
 
             <div className="flex flex-wrap gap-x-6 gap-y-2">
@@ -190,6 +217,7 @@ export default function SettingsPage() {
                   <th className="px-3 py-3">Username</th>
                   <th className="px-3 py-3">Task role</th>
                   <th className="px-3 py-3">Manager</th>
+                  <th className="px-3 py-3">Department</th>
                   <th className="px-3 py-3">Users page</th>
                   <th className="px-3 py-3 text-right">Action</th>
                 </tr>
@@ -202,6 +230,7 @@ export default function SettingsPage() {
                       {u.permissions?.boss ? "Admin" : u.permissions?.taskManager ? "Manager" : "Staff"}
                     </td>
                     <td className="px-3 py-2.5 text-xs text-slate-600">{u.managerUsername || "-"}</td>
+                    <td className="px-3 py-2.5 text-xs text-slate-600">{deptName(u.department)}</td>
                     <td className="px-3 py-2.5 text-xs text-slate-600">{u.permissions?.users ? "Yes" : "-"}</td>
                     <td className="px-3 py-2.5 text-right whitespace-nowrap">
                       <button type="button" onClick={() => startEdit(u)} title="Edit" className="p-2 rounded-lg hover:bg-slate-100 cursor-pointer"><FiEdit2 size={14} /></button>
@@ -210,7 +239,7 @@ export default function SettingsPage() {
                   </tr>
                 ))}
                 {!users.length && (
-                  <tr><td colSpan={5} className="p-8 text-center text-xs font-black uppercase tracking-widest text-slate-400">Koi user nahi</td></tr>
+                  <tr><td colSpan={6} className="p-8 text-center text-xs font-black uppercase tracking-widest text-slate-400">Koi user nahi</td></tr>
                 )}
               </tbody>
             </table>
